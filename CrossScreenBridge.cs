@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -36,6 +37,7 @@ namespace CrossScreenBridge
     {
         const int DiscoveryPort = 45990;
         const int TransferPort = 45991;
+        const int ControlPort = 45992;
         const int HotkeyId = 0xC501;
         const int WmHotkey = 0x0312;
         const uint ModAlt = 0x0001;
@@ -52,12 +54,31 @@ namespace CrossScreenBridge
         readonly Label emptyLabel = new Label();
         readonly ProgressBar progress = new ProgressBar();
         readonly TextBox manualIp = new TextBox();
+        readonly System.Windows.Forms.Timer mouseTimer = new System.Windows.Forms.Timer();
+        readonly List<string> carriedPaths = new List<string>();
         bool bridgeEnabled;
+        bool controllingRemote;
+        bool lastLeftDown;
+        Peer controlPeer;
+        Point localReturnPoint;
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct NativePoint { public int X; public int Y; }
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint key);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool GetCursorPos(out NativePoint point);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool SetCursorPos(int x, int y);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern int ShowCursor(bool show);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern short GetAsyncKeyState(int key);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern IntPtr GetForegroundWindow();
 
         public MainForm()
         {
@@ -66,7 +87,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥";
+            Text = "跨屏桥 V5 · 跨屏实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -79,7 +100,9 @@ namespace CrossScreenBridge
             BuildUi();
             DragEnter += OnDragEnter;
             DragDrop += OnDragDrop;
-            FormClosing += (s, e) => { stop.Cancel(); UnregisterHotKey(Handle, HotkeyId); };
+            mouseTimer.Interval = 16;
+            mouseTimer.Tick += (s, e) => PollCrossScreenMouse();
+            FormClosing += (s, e) => { CancelCrossScreen("软件已退出"); stop.Cancel(); UnregisterHotKey(Handle, HotkeyId); };
             Shown += (s, e) => StartNetworking();
         }
 
@@ -152,12 +175,150 @@ namespace CrossScreenBridge
 
         void ToggleBridge()
         {
-            bridgeEnabled = !bridgeEnabled;
-            modeLabel.Text = bridgeEnabled ? "跨屏通道已开启 · 再按 Alt+C 关闭" : "Alt+C 开启跨屏通道";
-            modeLabel.ForeColor = bridgeEnabled ? Color.FromArgb(5, 150, 105) : Color.FromArgb(100, 116, 139);
-            TopMost = bridgeEnabled;
-            if (bridgeEnabled) { Show(); WindowState = FormWindowState.Normal; Activate(); }
+            if (bridgeEnabled) { CancelCrossScreen("已取消跨屏模式"); return; }
+            controlPeer = peerList.SelectedItem as Peer;
+            if (controlPeer == null) { Show(); Activate(); SetStatus("请先选择另一台设备。", true); return; }
+            var selected = GetExplorerSelectedPaths();
+            if (selected.Count == 0)
+            {
+                Show(); WindowState = FormWindowState.Normal; Activate();
+                SetStatus("请先在资源管理器中选中文件或文件夹，再按 Alt+C。", true);
+                return;
+            }
+            carriedPaths.Clear(); carriedPaths.AddRange(selected);
+            bridgeEnabled = true;
+            modeLabel.Text = "已携带 " + carriedPaths.Count + " 项 · 将鼠标推过左右屏幕边缘";
+            modeLabel.ForeColor = Color.FromArgb(5, 150, 105);
+            SetStatus("跨屏已准备：越过屏幕边缘后，在远端单击即可放下并传输；Esc 取消。", false);
+            mouseTimer.Start();
             UpdateDropHint();
+        }
+
+        void PollCrossScreenMouse()
+        {
+            if (!bridgeEnabled) return;
+            if ((GetAsyncKeyState((int)Keys.Escape) & 0x8000) != 0) { CancelCrossScreen("已取消跨屏模式"); return; }
+            NativePoint cursor;
+            if (!GetCursorPos(out cursor)) return;
+            var bounds = Screen.PrimaryScreen.Bounds;
+            if (!controllingRemote)
+            {
+                if (cursor.X <= bounds.Left + 1 || cursor.X >= bounds.Right - 2)
+                {
+                    controllingRemote = true;
+                    localReturnPoint = new Point(cursor.X <= bounds.Left + 1 ? bounds.Left + 8 : bounds.Right - 9, cursor.Y);
+                    SetCursorPos(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
+                    ShowCursor(false);
+                    SendControl(controlPeer, "ENTER|" + carriedPaths.Count);
+                    SetStatus("鼠标已进入 " + controlPeer.Name + "；移动到目标位置后单击放下。", false);
+                }
+                return;
+            }
+
+            var centerX = bounds.Left + bounds.Width / 2;
+            var centerY = bounds.Top + bounds.Height / 2;
+            var dx = cursor.X - centerX;
+            var dy = cursor.Y - centerY;
+            if (dx != 0 || dy != 0)
+            {
+                SendControl(controlPeer, "MOVE|" + dx + "|" + dy);
+                SetCursorPos(centerX, centerY);
+            }
+            var leftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
+            if (leftDown && !lastLeftDown) DropOnRemote();
+            lastLeftDown = leftDown;
+        }
+
+        async void DropOnRemote()
+        {
+            if (!controllingRemote || controlPeer == null) return;
+            mouseTimer.Stop();
+            RestoreLocalCursor();
+            SendControl(controlPeer, "DROP|" + carriedPaths.Count);
+            var peer = controlPeer;
+            var paths = carriedPaths.ToArray();
+            bridgeEnabled = false;
+            modeLabel.Text = "正在向 " + peer.Name + " 传输…";
+            try
+            {
+                foreach (var item in ExpandPaths(paths)) await SendItem(peer, item);
+                SetStatus("跨屏传输完成。", false);
+            }
+            catch (Exception ex) { SetStatus("跨屏传输失败：" + ex.Message, true); }
+            finally
+            {
+                carriedPaths.Clear(); controlPeer = null;
+                modeLabel.Text = "Alt+C 开启跨屏通道";
+                modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
+                UpdateDropHint();
+            }
+        }
+
+        void CancelCrossScreen(string message)
+        {
+            mouseTimer.Stop();
+            if (controlPeer != null) SendControl(controlPeer, "CANCEL");
+            RestoreLocalCursor();
+            bridgeEnabled = false; carriedPaths.Clear(); controlPeer = null;
+            modeLabel.Text = "Alt+C 开启跨屏通道";
+            modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
+            SetStatus(message, false); UpdateDropHint();
+        }
+
+        void RestoreLocalCursor()
+        {
+            if (!controllingRemote) return;
+            controllingRemote = false; lastLeftDown = false;
+            ShowCursor(true);
+            SetCursorPos(localReturnPoint.X, localReturnPoint.Y);
+        }
+
+        void SendControl(Peer peer, string command)
+        {
+            try
+            {
+                using (var udp = new UdpClient())
+                {
+                    var data = Encoding.UTF8.GetBytes("CSC1|" + command);
+                    udp.Send(data, data.Length, peer.Address, ControlPort);
+                }
+            }
+            catch { }
+        }
+
+        List<string> GetExplorerSelectedPaths()
+        {
+            var result = new List<string>();
+            object shell = null;
+            try
+            {
+                shell = Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application"));
+                var windows = GetCom(shell, "Windows");
+                var count = Convert.ToInt32(GetCom(windows, "Count"));
+                var foreground = GetForegroundWindow().ToInt64();
+                for (var i = 0; i < count; i++)
+                {
+                    var window = GetCom(windows, "Item", i);
+                    if (window == null || Convert.ToInt64(GetCom(window, "HWND")) != foreground) continue;
+                    var document = GetCom(window, "Document");
+                    var selected = GetCom(document, "SelectedItems");
+                    var selectedCount = Convert.ToInt32(GetCom(selected, "Count"));
+                    for (var j = 0; j < selectedCount; j++)
+                    {
+                        var item = GetCom(selected, "Item", j);
+                        var path = Convert.ToString(GetCom(item, "Path"));
+                        if (File.Exists(path) || Directory.Exists(path)) result.Add(path);
+                    }
+                    break;
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        object GetCom(object target, string member, params object[] args)
+        {
+            return target.GetType().InvokeMember(member, BindingFlags.GetProperty, null, target, args);
         }
 
         void UpdateDropHint()
@@ -289,9 +450,45 @@ namespace CrossScreenBridge
             Task.Run(() => DiscoverySender(stop.Token));
             Task.Run(() => DiscoveryReceiver(stop.Token));
             Task.Run(() => TransferServer(stop.Token));
+            Task.Run(() => ControlReceiver(stop.Token));
             var cleanup = new System.Windows.Forms.Timer { Interval = 3000 };
             cleanup.Tick += (s, e) => RefreshPeerList();
             cleanup.Start();
+        }
+
+        async Task ControlReceiver(CancellationToken token)
+        {
+            using (var udp = new UdpClient(ControlPort))
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        var packet = await udp.ReceiveAsync();
+                        var text = Encoding.UTF8.GetString(packet.Buffer);
+                        if (!text.StartsWith("CSC1|")) continue;
+                        var parts = text.Split('|');
+                        if (parts.Length >= 4 && parts[1] == "MOVE")
+                        {
+                            NativePoint point;
+                            if (GetCursorPos(out point)) SetCursorPos(point.X + int.Parse(parts[2]), point.Y + int.Parse(parts[3]));
+                        }
+                        else if (parts.Length >= 3 && parts[1] == "ENTER")
+                        {
+                            BeginInvoke(new Action(() => { Show(); WindowState = FormWindowState.Normal; TopMost = true; SetStatus("另一台设备携带 " + parts[2] + " 项文件进入本屏幕。", false); }));
+                        }
+                        else if (parts.Length >= 2 && parts[1] == "DROP")
+                        {
+                            BeginInvoke(new Action(() => SetStatus("正在接收跨屏文件…", false)));
+                        }
+                        else if (parts.Length >= 2 && parts[1] == "CANCEL")
+                        {
+                            BeginInvoke(new Action(() => { TopMost = false; SetStatus("对方已取消跨屏操作。", false); }));
+                        }
+                    }
+                    catch { if (!token.IsCancellationRequested) Thread.Sleep(100); }
+                }
+            }
         }
 
         async Task DiscoverySender(CancellationToken token)
@@ -301,7 +498,7 @@ namespace CrossScreenBridge
                 udp.EnableBroadcast = true;
                 while (!token.IsCancellationRequested)
                 {
-                    var payload = Encoding.UTF8.GetBytes("CSB1|" + deviceName + "|" + TransferPort + "|" + pairingCode);
+                    var payload = Encoding.UTF8.GetBytes("CSB5|" + deviceName + "|" + TransferPort + "|" + pairingCode);
                     foreach (var broadcast in GetBroadcastAddresses())
                     {
                         try { await udp.SendAsync(payload, payload.Length, new IPEndPoint(broadcast, DiscoveryPort)); } catch { }
@@ -344,7 +541,7 @@ namespace CrossScreenBridge
                         var result = await udp.ReceiveAsync();
                         var text = Encoding.UTF8.GetString(result.Buffer);
                         var parts = text.Split('|');
-                        if (parts.Length == 4 && parts[0] == "CSB1" && parts[1] != deviceName)
+                        if (parts.Length == 4 && parts[0] == "CSB5" && parts[1] != deviceName)
                         {
                             var peer = new Peer { Name = parts[1], Address = result.RemoteEndPoint.Address.ToString(), Port = int.Parse(parts[2]), Code = parts[3], Seen = DateTime.UtcNow };
                             peers.AddOrUpdate(peer.Address, peer, (k, old) => peer);
