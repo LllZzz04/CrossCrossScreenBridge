@@ -62,13 +62,13 @@ namespace CrossScreenBridge
         readonly System.Windows.Forms.Timer mouseTimer = new System.Windows.Forms.Timer();
         readonly List<string> carriedPaths = new List<string>();
         bool bridgeEnabled;
+        bool selectionArmed;
         bool controllingRemote;
         bool lastLeftDown;
         bool remoteSawLeftDown;
         bool awaitingConfirmation;
         bool transferStarted;
         string confirmationId;
-        volatile bool physicalLeftDown;
         IntPtr mouseHook = IntPtr.Zero;
         LowLevelMouseProc mouseHookProc;
         IntPtr keyboardHook = IntPtr.Zero;
@@ -138,7 +138,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V5.6 · 远端目录选择实验版";
+            Text = "跨屏桥 V5.7 · 先启动后选择实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -232,25 +232,11 @@ namespace CrossScreenBridge
             if (bridgeEnabled) { CancelCrossScreen("已取消跨屏模式"); return; }
             controlPeer = peerList.SelectedItem as Peer;
             if (controlPeer == null) { Show(); Activate(); SetStatus("请先选择另一台设备。", true); return; }
-            var selected = GetExplorerSelectedPaths();
-            if (selected.Count == 0) selected = GetExplorerSelectionViaClipboard();
-            if (selected.Count == 0)
-            {
-                Show(); WindowState = FormWindowState.Normal; Activate();
-                SetStatus("请先在资源管理器中选中文件或文件夹，再按 Alt+C。", true);
-                return;
-            }
-            carriedPaths.Clear(); carriedPaths.AddRange(selected);
-            if (!InstallInputHooks())
-            {
-                carriedPaths.Clear();
-                Show(); Activate(); SetStatus("无法安装鼠标钩子，请重新启动软件后重试。", true);
-                return;
-            }
             bridgeEnabled = true;
-            modeLabel.Text = "已携带 " + carriedPaths.Count + " 项 · 将鼠标推过左右屏幕边缘";
+            selectionArmed = true;
+            modeLabel.Text = "选择文件后，将鼠标推过左右屏幕边缘";
             modeLabel.ForeColor = Color.FromArgb(5, 150, 105);
-            SetStatus("跨屏已准备：越过边缘后用鼠标选择远端目录，按 Enter 确认传输；Esc 取消。", false);
+            SetStatus("选择模式已开启：现在可在资源管理器中选择文件，然后移到屏幕边缘；Esc 取消。", false);
             mouseTimer.Start();
             UpdateDropHint();
         }
@@ -266,8 +252,32 @@ namespace CrossScreenBridge
             {
                 if (cursor.X <= bounds.Left + 1 || cursor.X >= bounds.Right - 2)
                 {
+                    if (selectionArmed)
+                    {
+                        var nativeDragActive = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
+                        if (nativeDragActive)
+                        {
+                            keybd_event((byte)Keys.Escape, 0, 0, UIntPtr.Zero);
+                            keybd_event((byte)Keys.Escape, 0, 0x0002, UIntPtr.Zero);
+                            Application.DoEvents();
+                        }
+                        var selected = GetExplorerSelectedPaths();
+                        if (selected.Count == 0) selected = GetExplorerSelectionViaClipboard();
+                        if (selected.Count == 0)
+                        {
+                            SetStatus("尚未识别到文件，请在资源管理器中完成选择后再移到屏幕边缘。", true);
+                            return;
+                        }
+                        carriedPaths.Clear(); carriedPaths.AddRange(selected);
+                        if (!InstallInputHooks())
+                        {
+                            CancelCrossScreen("无法安装输入钩子，请重新启动软件后重试。");
+                            return;
+                        }
+                        selectionArmed = false;
+                    }
                     controllingRemote = true;
-                    remoteSawLeftDown = physicalLeftDown;
+                    remoteSawLeftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
                     lastLeftDown = remoteSawLeftDown;
                     localReturnPoint = new Point(cursor.X <= bounds.Left + 1 ? bounds.Left + 8 : bounds.Right - 9, cursor.Y);
                     localControlAnchor = localReturnPoint;
@@ -339,7 +349,7 @@ namespace CrossScreenBridge
             mouseTimer.Stop();
             if (controlPeer != null) SendControl(controlPeer, "CANCEL");
             RestoreLocalCursor();
-            bridgeEnabled = false; carriedPaths.Clear(); controlPeer = null;
+            bridgeEnabled = false; selectionArmed = false; carriedPaths.Clear(); controlPeer = null;
             awaitingConfirmation = false; transferStarted = false; confirmationId = null; remoteSawLeftDown = false;
             RemoveInputHooks();
             modeLabel.Text = "Alt+C 开启跨屏通道";
@@ -390,7 +400,7 @@ namespace CrossScreenBridge
         {
             if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
             if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
-            mouseHook = IntPtr.Zero; mouseHookProc = null; physicalLeftDown = false;
+            mouseHook = IntPtr.Zero; mouseHookProc = null;
             keyboardHook = IntPtr.Zero; keyboardHookProc = null;
         }
 
@@ -401,13 +411,11 @@ namespace CrossScreenBridge
                 var message = wParam.ToInt32();
                 if (message == 0x0201)
                 {
-                    physicalLeftDown = true;
                     if (controllingRemote && controlPeer != null) BeginInvoke(new Action(() => SendControl(controlPeer, "BUTTON|DOWN")));
                     return new IntPtr(1);
                 }
                 if (message == 0x0202)
                 {
-                    physicalLeftDown = false;
                     if (controllingRemote && controlPeer != null) BeginInvoke(new Action(() => SendControl(controlPeer, "BUTTON|UP")));
                     return new IntPtr(1);
                 }
@@ -529,6 +537,7 @@ namespace CrossScreenBridge
             var peer = peerList.SelectedItem as Peer;
             if (label == null) return;
             if (!bridgeEnabled) label.Text = "选择设备并按 Alt+C\r\n然后把文件拖到这里";
+            else if (selectionArmed) label.Text = "选择模式已开启\r\n在资源管理器中选好文件后移到屏幕边缘";
             else if (peer == null) label.Text = "请先选择接收设备";
             else label.Text = "松手发送到 " + peer.Name + "\r\n支持文件和文件夹";
         }
