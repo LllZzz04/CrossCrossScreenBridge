@@ -115,6 +115,8 @@ namespace CrossScreenBridge
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")]
+        static extern int GetSystemMetrics(int index);
+        [DllImport("user32.dll")]
         static extern IntPtr WindowFromPoint(NativePoint point);
         [DllImport("user32.dll")]
         static extern IntPtr GetAncestor(IntPtr window, uint flags);
@@ -154,7 +156,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V6.2 · 完整鼠标交互实验版";
+            Text = "跨屏桥 V6.3 · 一比一鼠标实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -791,11 +793,9 @@ namespace CrossScreenBridge
                         var parts = text.Split('|');
                         if (parts.Length >= 4 && parts[1] == "MOVE")
                         {
-                            const uint moveFlag = 0x0001;
-                            const uint noCoalesceFlag = 0x2000;
                             var dx = int.Parse(parts[2]);
                             var dy = int.Parse(parts[3]);
-                            mouse_event(moveFlag | noCoalesceFlag, unchecked((uint)dx), unchecked((uint)dy), 0, UIntPtr.Zero);
+                            InjectAbsoluteMouseMove(dx, dy);
                         }
                         else if (parts.Length >= 5 && parts[1] == "ENTER")
                         {
@@ -808,7 +808,7 @@ namespace CrossScreenBridge
                                 var targetX = entrySide == "RIGHT" ? remoteBounds.Left + 8 : remoteBounds.Right - 9;
                                 var targetY = remoteBounds.Top + (int)Math.Round(normalizedY * (remoteBounds.Height - 1) / 10000.0);
                                 SetCursorPos(targetX, targetY);
-                                mouse_event(0x0001 | 0x2000, 0, 0, 0, UIntPtr.Zero);
+                                InjectAbsoluteMouseMove(0, 0);
                                 SetStatus("另一台设备携带 " + itemCount + " 项文件进入本屏幕。", false);
                             }));
                         }
@@ -870,6 +870,29 @@ namespace CrossScreenBridge
                     catch { if (!token.IsCancellationRequested) Thread.Sleep(100); }
                 }
             }
+        }
+
+        void InjectAbsoluteMouseMove(int deltaX, int deltaY)
+        {
+            NativePoint current;
+            if (!GetCursorPos(out current)) return;
+            const int virtualLeftMetric = 76;
+            const int virtualTopMetric = 77;
+            const int virtualWidthMetric = 78;
+            const int virtualHeightMetric = 79;
+            var left = GetSystemMetrics(virtualLeftMetric);
+            var top = GetSystemMetrics(virtualTopMetric);
+            var width = Math.Max(2, GetSystemMetrics(virtualWidthMetric));
+            var height = Math.Max(2, GetSystemMetrics(virtualHeightMetric));
+            var targetX = Math.Max(left, Math.Min(left + width - 1, current.X + deltaX));
+            var targetY = Math.Max(top, Math.Min(top + height - 1, current.Y + deltaY));
+            var absoluteX = (uint)Math.Round((targetX - left) * 65535.0 / (width - 1));
+            var absoluteY = (uint)Math.Round((targetY - top) * 65535.0 / (height - 1));
+            const uint move = 0x0001;
+            const uint noCoalesce = 0x2000;
+            const uint virtualDesktop = 0x4000;
+            const uint absolute = 0x8000;
+            mouse_event(move | noCoalesce | virtualDesktop | absolute, absoluteX, absoluteY, 0, UIntPtr.Zero);
         }
 
         async Task DiscoverySender(CancellationToken token)
