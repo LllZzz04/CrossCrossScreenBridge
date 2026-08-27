@@ -43,6 +43,7 @@ namespace CrossScreenBridge
         const int WmHotkey = 0x0312;
         const int WmInput = 0x00FF;
         const int WhMouseLl = 14;
+        const int WhKeyboardLl = 13;
         const uint ModAlt = 0x0001;
 
         readonly string deviceName = Environment.MachineName;
@@ -70,6 +71,8 @@ namespace CrossScreenBridge
         volatile bool physicalLeftDown;
         IntPtr mouseHook = IntPtr.Zero;
         LowLevelMouseProc mouseHookProc;
+        IntPtr keyboardHook = IntPtr.Zero;
+        LowLevelKeyboardProc keyboardHookProc;
         Peer controlPeer;
         Point localReturnPoint;
         Point localControlAnchor;
@@ -83,6 +86,7 @@ namespace CrossScreenBridge
         [StructLayout(LayoutKind.Sequential)]
         struct RawInputHeader { public uint Type; public uint Size; public IntPtr Device; public IntPtr WParam; }
         delegate IntPtr LowLevelMouseProc(int code, IntPtr wParam, IntPtr lParam);
+        delegate IntPtr LowLevelKeyboardProc(int code, IntPtr wParam, IntPtr lParam);
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint key);
@@ -116,12 +120,16 @@ namespace CrossScreenBridge
         static extern bool ClipCursor(IntPtr rect);
         [DllImport("user32.dll", SetLastError = true)]
         static extern IntPtr SetWindowsHookEx(int hookId, LowLevelMouseProc callback, IntPtr module, uint threadId);
+        [DllImport("user32.dll", EntryPoint = "SetWindowsHookEx", SetLastError = true)]
+        static extern IntPtr SetWindowsKeyboardHookEx(int hookId, LowLevelKeyboardProc callback, IntPtr module, uint threadId);
         [DllImport("user32.dll")]
         static extern bool UnhookWindowsHookEx(IntPtr hook);
         [DllImport("user32.dll")]
         static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
         [DllImport("kernel32.dll")]
         static extern IntPtr GetModuleHandle(string moduleName);
+        [DllImport("user32.dll")]
+        static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 
         public MainForm()
         {
@@ -130,7 +138,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V5.5 · 资源管理器投放实验版";
+            Text = "跨屏桥 V5.6 · 远端目录选择实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -233,7 +241,7 @@ namespace CrossScreenBridge
                 return;
             }
             carriedPaths.Clear(); carriedPaths.AddRange(selected);
-            if (!InstallMouseHook())
+            if (!InstallInputHooks())
             {
                 carriedPaths.Clear();
                 Show(); Activate(); SetStatus("无法安装鼠标钩子，请重新启动软件后重试。", true);
@@ -242,7 +250,7 @@ namespace CrossScreenBridge
             bridgeEnabled = true;
             modeLabel.Text = "已携带 " + carriedPaths.Count + " 项 · 将鼠标推过左右屏幕边缘";
             modeLabel.ForeColor = Color.FromArgb(5, 150, 105);
-            SetStatus("跨屏已准备：越过屏幕边缘后，在远端单击即可放下并传输；Esc 取消。", false);
+            SetStatus("跨屏已准备：越过边缘后用鼠标选择远端目录，按 Enter 确认传输；Esc 取消。", false);
             mouseTimer.Start();
             UpdateDropHint();
         }
@@ -268,22 +276,11 @@ namespace CrossScreenBridge
                     ClipCursor(ref lockRect);
                     HideLocalCursor();
                     SendControl(controlPeer, "ENTER|" + carriedPaths.Count);
-                    SetStatus("鼠标已进入 " + controlPeer.Name + "；移动到目标位置后单击放下。", false);
+                    SetStatus("鼠标已进入 " + controlPeer.Name + "；可点击并进入目录，选好后按 Enter。", false);
                 }
                 return;
             }
 
-            var leftDown = physicalLeftDown;
-            if (awaitingConfirmation)
-            {
-                if (leftDown != lastLeftDown) SendControl(controlPeer, "BUTTON|" + (leftDown ? "DOWN" : "UP"));
-            }
-            else
-            {
-                if (leftDown) remoteSawLeftDown = true;
-                if (!leftDown && lastLeftDown && remoteSawLeftDown) RequestRemoteConfirmation();
-            }
-            lastLeftDown = leftDown;
         }
 
         void RequestRemoteConfirmation()
@@ -301,7 +298,7 @@ namespace CrossScreenBridge
             awaitingConfirmation = false;
             mouseTimer.Stop();
             RestoreLocalCursor();
-            RemoveMouseHook();
+            RemoveInputHooks();
             if (!accepted)
             {
                 bridgeEnabled = false; carriedPaths.Clear(); controlPeer = null;
@@ -344,7 +341,7 @@ namespace CrossScreenBridge
             RestoreLocalCursor();
             bridgeEnabled = false; carriedPaths.Clear(); controlPeer = null;
             awaitingConfirmation = false; transferStarted = false; confirmationId = null; remoteSawLeftDown = false;
-            RemoveMouseHook();
+            RemoveInputHooks();
             modeLabel.Text = "Alt+C 开启跨屏通道";
             modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
             SetStatus(message, false); UpdateDropHint();
@@ -377,19 +374,24 @@ namespace CrossScreenBridge
             finally { Marshal.FreeHGlobal(buffer); }
         }
 
-        bool InstallMouseHook()
+        bool InstallInputHooks()
         {
-            if (mouseHook != IntPtr.Zero) return true;
+            if (mouseHook != IntPtr.Zero && keyboardHook != IntPtr.Zero) return true;
             mouseHookProc = MouseHookCallback;
             mouseHook = SetWindowsHookEx(WhMouseLl, mouseHookProc, GetModuleHandle(null), 0);
-            return mouseHook != IntPtr.Zero;
+            keyboardHookProc = KeyboardHookCallback;
+            keyboardHook = SetWindowsKeyboardHookEx(WhKeyboardLl, keyboardHookProc, GetModuleHandle(null), 0);
+            if (mouseHook != IntPtr.Zero && keyboardHook != IntPtr.Zero) return true;
+            RemoveInputHooks();
+            return false;
         }
 
-        void RemoveMouseHook()
+        void RemoveInputHooks()
         {
-            if (mouseHook == IntPtr.Zero) return;
-            UnhookWindowsHookEx(mouseHook);
+            if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
+            if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
             mouseHook = IntPtr.Zero; mouseHookProc = null; physicalLeftDown = false;
+            keyboardHook = IntPtr.Zero; keyboardHookProc = null;
         }
 
         IntPtr MouseHookCallback(int code, IntPtr wParam, IntPtr lParam)
@@ -397,11 +399,41 @@ namespace CrossScreenBridge
             if (code >= 0 && bridgeEnabled)
             {
                 var message = wParam.ToInt32();
-                if (message == 0x0201) { physicalLeftDown = true; return new IntPtr(1); }
-                if (message == 0x0202) { physicalLeftDown = false; return new IntPtr(1); }
+                if (message == 0x0201)
+                {
+                    physicalLeftDown = true;
+                    if (controllingRemote && controlPeer != null) BeginInvoke(new Action(() => SendControl(controlPeer, "BUTTON|DOWN")));
+                    return new IntPtr(1);
+                }
+                if (message == 0x0202)
+                {
+                    physicalLeftDown = false;
+                    if (controllingRemote && controlPeer != null) BeginInvoke(new Action(() => SendControl(controlPeer, "BUTTON|UP")));
+                    return new IntPtr(1);
+                }
                 if (controllingRemote && message == 0x0200) return new IntPtr(1);
             }
             return CallNextHookEx(mouseHook, code, wParam, lParam);
+        }
+
+        IntPtr KeyboardHookCallback(int code, IntPtr wParam, IntPtr lParam)
+        {
+            if (code >= 0 && bridgeEnabled && controllingRemote)
+            {
+                var message = wParam.ToInt32();
+                var virtualKey = Marshal.ReadInt32(lParam);
+                if (virtualKey == (int)Keys.Enter)
+                {
+                    var keyDown = message == 0x0100 || message == 0x0104;
+                    var keyUp = message == 0x0101 || message == 0x0105;
+                    if (keyDown && !awaitingConfirmation)
+                        BeginInvoke(new Action(RequestRemoteConfirmation));
+                    else if (awaitingConfirmation && (keyDown || keyUp))
+                        SendControl(controlPeer, "KEY|ENTER|" + (keyDown ? "DOWN" : "UP"));
+                    return new IntPtr(1);
+                }
+            }
+            return CallNextHookEx(keyboardHook, code, wParam, lParam);
         }
 
         void HideLocalCursor()
@@ -680,6 +712,11 @@ namespace CrossScreenBridge
                             const uint leftDownFlag = 0x0002;
                             const uint leftUpFlag = 0x0004;
                             mouse_event(parts[2] == "DOWN" ? leftDownFlag : leftUpFlag, 0, 0, 0, UIntPtr.Zero);
+                        }
+                        else if (parts.Length >= 4 && parts[1] == "KEY" && parts[2] == "ENTER")
+                        {
+                            const uint keyUpFlag = 0x0002;
+                            keybd_event(0x0D, 0, parts[3] == "UP" ? keyUpFlag : 0, UIntPtr.Zero);
                         }
                         else if (parts.Length >= 2 && parts[1] == "DROP")
                         {
