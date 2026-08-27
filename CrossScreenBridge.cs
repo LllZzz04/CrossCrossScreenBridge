@@ -159,7 +159,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V6.6 · 无控制台托盘版";
+            Text = "跨屏桥 V6.7 · 单实例托盘版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -1220,7 +1220,20 @@ namespace CrossScreenBridge
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            bool createdNew;
+            using (var singleInstance = new Mutex(true, "Local\\CrossScreenBridge.SingleInstance", out createdNew))
+            {
+                if (!createdNew)
+                {
+                    MessageBox.Show("跨屏桥已经在运行。\r\n\r\n请在系统托盘中找到跨屏桥图标。", "跨屏桥", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                try { Application.Run(new MainForm()); }
+                finally
+                {
+                    try { singleInstance.ReleaseMutex(); } catch { }
+                }
+            }
         }
     }
 }
