@@ -73,6 +73,7 @@ namespace CrossScreenBridge
         int pendingRawX;
         int pendingRawY;
         System.Threading.Timer rawInputFlushTimer;
+        bool highResolutionTimerEnabled;
         bool controllingRemote;
         volatile bool remoteEntryReady;
         bool lastLeftDown;
@@ -141,6 +142,10 @@ namespace CrossScreenBridge
         static extern IntPtr GetModuleHandle(string moduleName);
         [DllImport("user32.dll")]
         static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+        [DllImport("winmm.dll")]
+        static extern uint timeBeginPeriod(uint period);
+        [DllImport("winmm.dll")]
+        static extern uint timeEndPeriod(uint period);
 
         public MainForm()
         {
@@ -149,7 +154,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V6.0 · 低延迟输入修正版";
+            Text = "跨屏桥 V6.1 · 240Hz 输入实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -164,7 +169,7 @@ namespace CrossScreenBridge
             DragDrop += OnDragDrop;
             mouseTimer.Interval = 16;
             mouseTimer.Tick += (s, e) => PollCrossScreenMouse();
-            FormClosing += (s, e) => { CancelCrossScreen("软件已退出"); stop.Cancel(); if (rawInputFlushTimer != null) rawInputFlushTimer.Dispose(); controlSender.Close(); UnregisterHotKey(Handle, HotkeyId); };
+            FormClosing += (s, e) => { CancelCrossScreen("软件已退出"); stop.Cancel(); StopHighRateInput(); controlSender.Close(); UnregisterHotKey(Handle, HotkeyId); };
             Shown += (s, e) => StartNetworking();
         }
 
@@ -311,6 +316,7 @@ namespace CrossScreenBridge
                     localControlAnchor = localReturnPoint;
                     Interlocked.Exchange(ref pendingRawX, 0);
                     Interlocked.Exchange(ref pendingRawY, 0);
+                    StartHighRateInput();
                     SetCursorPos(localControlAnchor.X, localControlAnchor.Y);
                     var lockRect = new NativeRect { Left = localControlAnchor.X, Top = localControlAnchor.Y, Right = localControlAnchor.X + 1, Bottom = localControlAnchor.Y + 1 };
                     ClipCursor(ref lockRect);
@@ -429,6 +435,7 @@ namespace CrossScreenBridge
             if (!controllingRemote) return;
             controllingRemote = false; lastLeftDown = false; remoteSawLeftDown = false;
             remoteEntryReady = false;
+            StopHighRateInput();
             ClipCursor(IntPtr.Zero);
             Interlocked.Exchange(ref pendingRawX, 0);
             Interlocked.Exchange(ref pendingRawY, 0);
@@ -733,10 +740,28 @@ namespace CrossScreenBridge
             Task.Run(() => DiscoveryReceiver(stop.Token));
             Task.Run(() => TransferServer(stop.Token));
             Task.Run(() => ControlReceiver(stop.Token));
-            rawInputFlushTimer = new System.Threading.Timer(FlushRawMouseMovement, null, 16, 16);
             var cleanup = new System.Windows.Forms.Timer { Interval = 3000 };
             cleanup.Tick += (s, e) => RefreshPeerList();
             cleanup.Start();
+        }
+
+        void StartHighRateInput()
+        {
+            if (rawInputFlushTimer != null) return;
+            highResolutionTimerEnabled = timeBeginPeriod(1) == 0;
+            rawInputFlushTimer = new System.Threading.Timer(FlushRawMouseMovement, null, 4, 4);
+        }
+
+        void StopHighRateInput()
+        {
+            var timer = rawInputFlushTimer;
+            rawInputFlushTimer = null;
+            if (timer != null) timer.Dispose();
+            if (highResolutionTimerEnabled)
+            {
+                timeEndPeriod(1);
+                highResolutionTimerEnabled = false;
+            }
         }
 
         void FlushRawMouseMovement(object state)
