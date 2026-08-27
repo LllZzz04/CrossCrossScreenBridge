@@ -143,7 +143,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V5.8 · 低延迟切屏实验版";
+            Text = "跨屏桥 V5.9 · 边缘映射修正版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -270,6 +270,8 @@ namespace CrossScreenBridge
                 }
                 if (cursor.X <= bounds.Left + 1 || cursor.X >= bounds.Right - 2)
                 {
+                    var entrySide = cursor.X <= bounds.Left + 1 ? "LEFT" : "RIGHT";
+                    var entryY = bounds.Height <= 1 ? 0 : (int)Math.Round((cursor.Y - bounds.Top) * 10000.0 / (bounds.Height - 1));
                     if (selectionArmed)
                     {
                         var nativeDragActive = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
@@ -304,7 +306,7 @@ namespace CrossScreenBridge
                     var lockRect = new NativeRect { Left = localControlAnchor.X, Top = localControlAnchor.Y, Right = localControlAnchor.X + 1, Bottom = localControlAnchor.Y + 1 };
                     ClipCursor(ref lockRect);
                     HideLocalCursor();
-                    SendControl(controlPeer, "ENTER|" + carriedPaths.Count);
+                    SendControl(controlPeer, "ENTER|" + carriedPaths.Count + "|" + entrySide + "|" + entryY);
                     SetStatus("鼠标已进入 " + controlPeer.Name + "；可点击并进入目录，选好后按 Enter。", false);
                 }
                 return;
@@ -739,9 +741,19 @@ namespace CrossScreenBridge
                             NativePoint point;
                             if (GetCursorPos(out point)) SetCursorPos(point.X + int.Parse(parts[2]), point.Y + int.Parse(parts[3]));
                         }
-                        else if (parts.Length >= 3 && parts[1] == "ENTER")
+                        else if (parts.Length >= 5 && parts[1] == "ENTER")
                         {
-                            BeginInvoke(new Action(() => { Show(); WindowState = FormWindowState.Normal; TopMost = true; SetStatus("另一台设备携带 " + parts[2] + " 项文件进入本屏幕。", false); }));
+                            var itemCount = parts[2];
+                            var entrySide = parts[3];
+                            var normalizedY = Math.Max(0, Math.Min(10000, int.Parse(parts[4])));
+                            BeginInvoke(new Action(() =>
+                            {
+                                var remoteBounds = Screen.PrimaryScreen.Bounds;
+                                var targetX = entrySide == "RIGHT" ? remoteBounds.Left + 8 : remoteBounds.Right - 9;
+                                var targetY = remoteBounds.Top + (int)Math.Round(normalizedY * (remoteBounds.Height - 1) / 10000.0);
+                                SetCursorPos(targetX, targetY);
+                                SetStatus("另一台设备携带 " + itemCount + " 项文件进入本屏幕。", false);
+                            }));
                         }
                         else if (parts.Length >= 4 && parts[1] == "PROMPT")
                         {
