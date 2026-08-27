@@ -154,7 +154,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V6.1 · 240Hz 输入实验版";
+            Text = "跨屏桥 V6.2 · 完整鼠标交互实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -791,8 +791,11 @@ namespace CrossScreenBridge
                         var parts = text.Split('|');
                         if (parts.Length >= 4 && parts[1] == "MOVE")
                         {
-                            NativePoint point;
-                            if (GetCursorPos(out point)) SetCursorPos(point.X + int.Parse(parts[2]), point.Y + int.Parse(parts[3]));
+                            const uint moveFlag = 0x0001;
+                            const uint noCoalesceFlag = 0x2000;
+                            var dx = int.Parse(parts[2]);
+                            var dy = int.Parse(parts[3]);
+                            mouse_event(moveFlag | noCoalesceFlag, unchecked((uint)dx), unchecked((uint)dy), 0, UIntPtr.Zero);
                         }
                         else if (parts.Length >= 5 && parts[1] == "ENTER")
                         {
@@ -805,6 +808,7 @@ namespace CrossScreenBridge
                                 var targetX = entrySide == "RIGHT" ? remoteBounds.Left + 8 : remoteBounds.Right - 9;
                                 var targetY = remoteBounds.Top + (int)Math.Round(normalizedY * (remoteBounds.Height - 1) / 10000.0);
                                 SetCursorPos(targetX, targetY);
+                                mouse_event(0x0001 | 0x2000, 0, 0, 0, UIntPtr.Zero);
                                 SetStatus("另一台设备携带 " + itemCount + " 项文件进入本屏幕。", false);
                             }));
                         }
