@@ -179,6 +179,7 @@ namespace CrossScreenBridge
             controlPeer = peerList.SelectedItem as Peer;
             if (controlPeer == null) { Show(); Activate(); SetStatus("请先选择另一台设备。", true); return; }
             var selected = GetExplorerSelectedPaths();
+            if (selected.Count == 0) selected = GetExplorerSelectionViaClipboard();
             if (selected.Count == 0)
             {
                 Show(); WindowState = FormWindowState.Normal; Activate();
@@ -318,7 +319,34 @@ namespace CrossScreenBridge
 
         object GetCom(object target, string member, params object[] args)
         {
-            return target.GetType().InvokeMember(member, BindingFlags.GetProperty, null, target, args);
+            return target.GetType().InvokeMember(member, BindingFlags.GetProperty | BindingFlags.InvokeMethod, null, target, args);
+        }
+
+        List<string> GetExplorerSelectionViaClipboard()
+        {
+            var result = new List<string>();
+            IDataObject previous = null;
+            try
+            {
+                previous = Clipboard.GetDataObject();
+                SendKeys.SendWait("^c");
+                Application.DoEvents();
+                Thread.Sleep(120);
+                if (Clipboard.ContainsFileDropList())
+                {
+                    foreach (string path in Clipboard.GetFileDropList())
+                        if (File.Exists(path) || Directory.Exists(path)) result.Add(path);
+                }
+            }
+            catch { }
+            finally
+            {
+                if (previous != null)
+                {
+                    try { Clipboard.SetDataObject(previous, true); } catch { }
+                }
+            }
+            return result;
         }
 
         void UpdateDropHint()
