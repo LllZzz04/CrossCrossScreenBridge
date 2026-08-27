@@ -60,6 +60,8 @@ namespace CrossScreenBridge
         readonly ProgressBar progress = new ProgressBar();
         readonly TextBox manualIp = new TextBox();
         readonly System.Windows.Forms.Timer mouseTimer = new System.Windows.Forms.Timer();
+        readonly UdpClient controlSender = new UdpClient();
+        readonly object controlSendLock = new object();
         readonly List<string> carriedPaths = new List<string>();
         readonly object selectionCacheLock = new object();
         readonly List<string> selectionCache = new List<string>();
@@ -68,7 +70,11 @@ namespace CrossScreenBridge
         bool selectionButtonWasDown;
         bool selectionCaptureRunning;
         int selectionGeneration;
+        int pendingRawX;
+        int pendingRawY;
+        System.Threading.Timer rawInputFlushTimer;
         bool controllingRemote;
+        volatile bool remoteEntryReady;
         bool lastLeftDown;
         bool remoteSawLeftDown;
         bool awaitingConfirmation;
@@ -143,7 +149,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V5.9 · 边缘映射修正版";
+            Text = "跨屏桥 V6.0 · 低延迟输入修正版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -158,7 +164,7 @@ namespace CrossScreenBridge
             DragDrop += OnDragDrop;
             mouseTimer.Interval = 16;
             mouseTimer.Tick += (s, e) => PollCrossScreenMouse();
-            FormClosing += (s, e) => { CancelCrossScreen("软件已退出"); stop.Cancel(); UnregisterHotKey(Handle, HotkeyId); };
+            FormClosing += (s, e) => { CancelCrossScreen("软件已退出"); stop.Cancel(); if (rawInputFlushTimer != null) rawInputFlushTimer.Dispose(); controlSender.Close(); UnregisterHotKey(Handle, HotkeyId); };
             Shown += (s, e) => StartNetworking();
         }
 
@@ -298,15 +304,19 @@ namespace CrossScreenBridge
                         selectionArmed = false;
                     }
                     controllingRemote = true;
+                    remoteEntryReady = false;
                     remoteSawLeftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
                     lastLeftDown = remoteSawLeftDown;
                     localReturnPoint = new Point(cursor.X <= bounds.Left + 1 ? bounds.Left + 8 : bounds.Right - 9, cursor.Y);
                     localControlAnchor = localReturnPoint;
+                    Interlocked.Exchange(ref pendingRawX, 0);
+                    Interlocked.Exchange(ref pendingRawY, 0);
                     SetCursorPos(localControlAnchor.X, localControlAnchor.Y);
                     var lockRect = new NativeRect { Left = localControlAnchor.X, Top = localControlAnchor.Y, Right = localControlAnchor.X + 1, Bottom = localControlAnchor.Y + 1 };
                     ClipCursor(ref lockRect);
                     HideLocalCursor();
                     SendControl(controlPeer, "ENTER|" + carriedPaths.Count + "|" + entrySide + "|" + entryY);
+                    remoteEntryReady = true;
                     SetStatus("鼠标已进入 " + controlPeer.Name + "；可点击并进入目录，选好后按 Enter。", false);
                 }
                 return;
@@ -418,7 +428,10 @@ namespace CrossScreenBridge
         {
             if (!controllingRemote) return;
             controllingRemote = false; lastLeftDown = false; remoteSawLeftDown = false;
+            remoteEntryReady = false;
             ClipCursor(IntPtr.Zero);
+            Interlocked.Exchange(ref pendingRawX, 0);
+            Interlocked.Exchange(ref pendingRawY, 0);
             ShowLocalCursor();
             SetCursorPos(localReturnPoint.X, localReturnPoint.Y);
         }
@@ -436,7 +449,8 @@ namespace CrossScreenBridge
                 var body = IntPtr.Add(buffer, (int)headerSize);
                 var dx = Marshal.ReadInt32(body, 12);
                 var dy = Marshal.ReadInt32(body, 16);
-                if ((dx != 0 || dy != 0) && controlPeer != null) SendControl(controlPeer, "MOVE|" + dx + "|" + dy);
+                if (dx != 0) Interlocked.Add(ref pendingRawX, dx);
+                if (dy != 0) Interlocked.Add(ref pendingRawY, dy);
             }
             finally { Marshal.FreeHGlobal(buffer); }
         }
@@ -517,10 +531,10 @@ namespace CrossScreenBridge
         {
             try
             {
-                using (var udp = new UdpClient())
+                var data = Encoding.UTF8.GetBytes("CSC1|" + command);
+                lock (controlSendLock)
                 {
-                    var data = Encoding.UTF8.GetBytes("CSC1|" + command);
-                    udp.Send(data, data.Length, peer.Address, ControlPort);
+                    controlSender.Send(data, data.Length, peer.Address, ControlPort);
                 }
             }
             catch { }
@@ -719,9 +733,23 @@ namespace CrossScreenBridge
             Task.Run(() => DiscoveryReceiver(stop.Token));
             Task.Run(() => TransferServer(stop.Token));
             Task.Run(() => ControlReceiver(stop.Token));
+            rawInputFlushTimer = new System.Threading.Timer(FlushRawMouseMovement, null, 16, 16);
             var cleanup = new System.Windows.Forms.Timer { Interval = 3000 };
             cleanup.Tick += (s, e) => RefreshPeerList();
             cleanup.Start();
+        }
+
+        void FlushRawMouseMovement(object state)
+        {
+            if (!controllingRemote || !remoteEntryReady || controlPeer == null)
+            {
+                Interlocked.Exchange(ref pendingRawX, 0);
+                Interlocked.Exchange(ref pendingRawY, 0);
+                return;
+            }
+            var dx = Interlocked.Exchange(ref pendingRawX, 0);
+            var dy = Interlocked.Exchange(ref pendingRawY, 0);
+            if (dx != 0 || dy != 0) SendControl(controlPeer, "MOVE|" + dx + "|" + dy);
         }
 
         async Task ControlReceiver(CancellationToken token)
