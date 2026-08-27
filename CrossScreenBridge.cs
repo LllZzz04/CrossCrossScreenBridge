@@ -45,6 +45,7 @@ namespace CrossScreenBridge
         const int WhMouseLl = 14;
         const int WhKeyboardLl = 13;
         const uint ModAlt = 0x0001;
+        const uint ModControl = 0x0002;
 
         readonly string deviceName = Environment.MachineName;
         readonly string pairingCode;
@@ -59,6 +60,7 @@ namespace CrossScreenBridge
         readonly Label emptyLabel = new Label();
         readonly ProgressBar progress = new ProgressBar();
         readonly TextBox manualIp = new TextBox();
+        readonly NotifyIcon trayIcon = new NotifyIcon();
         readonly System.Windows.Forms.Timer mouseTimer = new System.Windows.Forms.Timer();
         readonly UdpClient controlSender = new UdpClient();
         readonly object controlSendLock = new object();
@@ -74,6 +76,7 @@ namespace CrossScreenBridge
         int pendingRawY;
         System.Threading.Timer rawInputFlushTimer;
         bool highResolutionTimerEnabled;
+        bool allowExit;
         bool controllingRemote;
         volatile bool remoteEntryReady;
         bool lastLeftDown;
@@ -156,7 +159,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V6.3 · 一比一鼠标实验版";
+            Text = "跨屏桥 V6.4 · 托盘版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -165,13 +168,16 @@ namespace CrossScreenBridge
             MinimumSize = new Size(520, 420);
             StartPosition = FormStartPosition.CenterScreen;
             AllowDrop = true;
+            ShowInTaskbar = false;
 
             BuildUi();
+            BuildTrayIcon();
             DragEnter += OnDragEnter;
             DragDrop += OnDragDrop;
             mouseTimer.Interval = 16;
             mouseTimer.Tick += (s, e) => PollCrossScreenMouse();
-            FormClosing += (s, e) => { CancelCrossScreen("软件已退出"); stop.Cancel(); StopHighRateInput(); controlSender.Close(); UnregisterHotKey(Handle, HotkeyId); };
+            FormClosing += OnFormClosing;
+            Resize += (s, e) => { if (WindowState == FormWindowState.Minimized) Hide(); };
             Shown += (s, e) => StartNetworking();
         }
 
@@ -179,7 +185,7 @@ namespace CrossScreenBridge
         {
             var header = new Panel { Dock = DockStyle.Top, Height = 100, Padding = new Padding(22, 16, 22, 8), BackColor = Color.White };
             var title = new Label { Text = "跨屏桥", Font = new Font(Font.FontFamily, 18F, FontStyle.Bold), AutoSize = true, Location = new Point(20, 14) };
-            modeLabel.Text = "Alt+C 开启跨屏通道";
+            modeLabel.Text = "Ctrl+Alt+M 开启跨屏通道";
             modeLabel.AutoSize = true;
             modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
             modeLabel.Location = new Point(22, 55);
@@ -211,7 +217,7 @@ namespace CrossScreenBridge
             emptyLabel.Height = 70;
 
             var drop = new Panel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(18), AllowDrop = true };
-            var dropText = new Label { Name = "DropText", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Text = "选择设备并按 Alt+C\r\n然后把文件拖到这里", ForeColor = Color.FromArgb(71, 85, 105), AllowDrop = true };
+            var dropText = new Label { Name = "DropText", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Text = "选择设备并按 Ctrl+Alt+M\r\n进入等待选择状态", ForeColor = Color.FromArgb(71, 85, 105), AllowDrop = true };
             drop.DragEnter += OnDragEnter; drop.DragDrop += OnDragDrop;
             dropText.DragEnter += OnDragEnter; dropText.DragDrop += OnDragDrop;
             drop.Controls.Add(dropText);
@@ -229,11 +235,52 @@ namespace CrossScreenBridge
             Controls.Add(body); Controls.Add(header);
         }
 
+        void BuildTrayIcon()
+        {
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("打开跨屏桥", null, (s, e) => ShowMainWindow());
+            menu.Items.Add("取消当前跨屏", null, (s, e) => { if (bridgeEnabled) CancelCrossScreen("已从托盘取消跨屏模式"); });
+            menu.Items.Add("更改接收位置", null, (s, e) => { ShowMainWindow(); ChooseReceiveDirectory(false); });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("退出", null, (s, e) => { allowExit = true; Close(); });
+            trayIcon.Icon = SystemIcons.Application;
+            trayIcon.Text = "跨屏桥 · Ctrl+Alt+M";
+            trayIcon.ContextMenuStrip = menu;
+            trayIcon.Visible = true;
+            trayIcon.DoubleClick += (s, e) => ShowMainWindow();
+        }
+
+        void ShowMainWindow()
+        {
+            Show();
+            WindowState = FormWindowState.Normal;
+            Activate();
+        }
+
+        void OnFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (!allowExit && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                Hide();
+                trayIcon.ShowBalloonTip(1200, "跨屏桥仍在运行", "按 Ctrl+Alt+M 开启跨屏，或右键托盘图标退出。", ToolTipIcon.Info);
+                return;
+            }
+            allowExit = true;
+            CancelCrossScreen("软件已退出");
+            stop.Cancel();
+            StopHighRateInput();
+            controlSender.Close();
+            UnregisterHotKey(Handle, HotkeyId);
+            trayIcon.Visible = false;
+            trayIcon.Dispose();
+        }
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            if (!RegisterHotKey(Handle, HotkeyId, ModAlt, (uint)Keys.C))
-                SetStatus("Alt+C 已被其他软件占用，请关闭冲突软件后重启。", true);
+            if (!RegisterHotKey(Handle, HotkeyId, ModAlt | ModControl, (uint)Keys.M))
+                SetStatus("Ctrl+Alt+M 已被其他软件占用，请关闭冲突软件后重启。", true);
             var rawMouse = new RawInputDevice { UsagePage = 0x01, Usage = 0x02, Flags = 0x00000100, Target = Handle };
             RegisterRawInputDevices(new[] { rawMouse }, 1, (uint)Marshal.SizeOf(typeof(RawInputDevice)));
         }
@@ -351,7 +398,7 @@ namespace CrossScreenBridge
             if (!accepted)
             {
                 bridgeEnabled = false; carriedPaths.Clear(); controlPeer = null;
-                modeLabel.Text = "Alt+C 开启跨屏通道";
+                modeLabel.Text = "Ctrl+Alt+M 开启跨屏通道";
                 modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
                 SetStatus("接收方已取消传输。", false); UpdateDropHint();
                 return;
@@ -377,7 +424,7 @@ namespace CrossScreenBridge
             finally
             {
                 carriedPaths.Clear(); controlPeer = null; transferStarted = false; confirmationId = null;
-                modeLabel.Text = "Alt+C 开启跨屏通道";
+                modeLabel.Text = "Ctrl+Alt+M 开启跨屏通道";
                 modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
                 UpdateDropHint();
             }
@@ -392,7 +439,7 @@ namespace CrossScreenBridge
             selectionGeneration++; selectionCaptureRunning = false;
             awaitingConfirmation = false; transferStarted = false; confirmationId = null; remoteSawLeftDown = false;
             RemoveInputHooks();
-            modeLabel.Text = "Alt+C 开启跨屏通道";
+            modeLabel.Text = "Ctrl+Alt+M 开启跨屏通道";
             modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
             SetStatus(message, false); UpdateDropHint();
         }
@@ -616,7 +663,7 @@ namespace CrossScreenBridge
             var label = Controls.Find("DropText", true).FirstOrDefault() as Label;
             var peer = peerList.SelectedItem as Peer;
             if (label == null) return;
-            if (!bridgeEnabled) label.Text = "选择设备并按 Alt+C\r\n然后把文件拖到这里";
+            if (!bridgeEnabled) label.Text = "选择设备并按 Ctrl+Alt+M\r\n进入等待选择状态";
             else if (selectionArmed) label.Text = "选择模式已开启\r\n在资源管理器中选好文件后移到屏幕边缘";
             else if (peer == null) label.Text = "请先选择接收设备";
             else label.Text = "松手发送到 " + peer.Name + "\r\n支持文件和文件夹";
@@ -643,7 +690,7 @@ namespace CrossScreenBridge
                 var peer = new Peer { Name = "设备 " + value, Address = value, Port = TransferPort, Code = "MANUAL", Seen = DateTime.UtcNow.AddYears(1) };
                 peers.AddOrUpdate(value, peer, (k, old) => peer);
                 RefreshPeerList();
-                SetStatus("连接成功：" + value + "。按 Alt+C 后即可拖放文件。", false);
+                SetStatus("连接成功：" + value + "。按 Ctrl+Alt+M 后即可选择并跨屏传输。", false);
             }
             catch (Exception ex) { SetStatus("无法连接 " + value + "：" + ex.Message, true); }
         }
@@ -657,7 +704,7 @@ namespace CrossScreenBridge
         async void OnDragDrop(object sender, DragEventArgs e)
         {
             var peer = peerList.SelectedItem as Peer;
-            if (!bridgeEnabled || peer == null) { SetStatus("请先选择设备并按 Alt+C 开启通道。", true); return; }
+            if (!bridgeEnabled || peer == null) { SetStatus("请先选择设备并按 Ctrl+Alt+M 开启通道。", true); return; }
             var paths = (string[])e.Data.GetData(DataFormats.FileDrop);
             foreach (var item in ExpandPaths(paths))
             {
