@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0CrossScreenBridge.ps1"
-
+start "" powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0CrossScreenBridge.ps1"
+exit /b

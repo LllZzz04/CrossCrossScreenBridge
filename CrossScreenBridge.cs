@@ -159,7 +159,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V6.4 · 托盘版";
+            Text = "跨屏桥 V6.5 · 静默托盘版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -178,7 +178,7 @@ namespace CrossScreenBridge
             mouseTimer.Tick += (s, e) => PollCrossScreenMouse();
             FormClosing += OnFormClosing;
             Resize += (s, e) => { if (WindowState == FormWindowState.Minimized) Hide(); };
-            Shown += (s, e) => StartNetworking();
+            Shown += (s, e) => { StartNetworking(); BeginInvoke(new Action(Hide)); };
         }
 
         void BuildUi()
@@ -296,7 +296,12 @@ namespace CrossScreenBridge
         {
             if (bridgeEnabled) { CancelCrossScreen("已取消跨屏模式"); return; }
             controlPeer = peerList.SelectedItem as Peer;
-            if (controlPeer == null) { Show(); Activate(); SetStatus("请先选择另一台设备。", true); return; }
+            if (controlPeer == null)
+            {
+                SetStatus("请先选择另一台设备。", true);
+                trayIcon.ShowBalloonTip(1800, "尚未选择设备", "请双击托盘图标打开跨屏桥并选择接收设备。", ToolTipIcon.Warning);
+                return;
+            }
             bridgeEnabled = true;
             selectionArmed = true;
             selectionGeneration++;
@@ -867,15 +872,13 @@ namespace CrossScreenBridge
                             BeginInvoke(new Action(() =>
                             {
                                 var destination = ResolveRemoteDropDirectory();
-                                Show(); WindowState = FormWindowState.Normal; TopMost = true; Activate();
-                                var answer = MessageBox.Show(this,
+                                var answer = MessageBox.Show(
                                     "是否要将 " + itemCount + " 项文件传输到：\r\n\r\n" + destination,
                                     "确认跨屏传输", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                                 if (answer == DialogResult.Yes) pendingDropDirectories[sourceAddress] = destination;
                                 else { string ignored; pendingDropDirectories.TryRemove(sourceAddress, out ignored); }
                                 var sourcePeer = new Peer { Address = sourceAddress, Port = TransferPort, Name = sourceAddress };
                                 SendControl(sourcePeer, "CONFIRM|" + requestId + "|" + (answer == DialogResult.Yes ? "YES" : "NO"));
-                                TopMost = false;
                             }));
                         }
                         else if (parts.Length >= 4 && parts[1] == "CONFIRM")
@@ -911,7 +914,7 @@ namespace CrossScreenBridge
                         {
                             string ignored;
                             pendingDropDirectories.TryRemove(packet.RemoteEndPoint.Address.ToString(), out ignored);
-                            BeginInvoke(new Action(() => { TopMost = false; SetStatus("对方已取消跨屏操作。", false); }));
+                            BeginInvoke(new Action(() => SetStatus("对方已取消跨屏操作。", false)));
                         }
                     }
                     catch { if (!token.IsCancellationRequested) Thread.Sleep(100); }
