@@ -61,8 +61,13 @@ namespace CrossScreenBridge
         readonly TextBox manualIp = new TextBox();
         readonly System.Windows.Forms.Timer mouseTimer = new System.Windows.Forms.Timer();
         readonly List<string> carriedPaths = new List<string>();
+        readonly object selectionCacheLock = new object();
+        readonly List<string> selectionCache = new List<string>();
         bool bridgeEnabled;
         bool selectionArmed;
+        bool selectionButtonWasDown;
+        bool selectionCaptureRunning;
+        int selectionGeneration;
         bool controllingRemote;
         bool lastLeftDown;
         bool remoteSawLeftDown;
@@ -138,7 +143,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V5.7 · 先启动后选择实验版";
+            Text = "跨屏桥 V5.8 · 低延迟切屏实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -234,6 +239,9 @@ namespace CrossScreenBridge
             if (controlPeer == null) { Show(); Activate(); SetStatus("请先选择另一台设备。", true); return; }
             bridgeEnabled = true;
             selectionArmed = true;
+            selectionGeneration++;
+            selectionCaptureRunning = false;
+            lock (selectionCacheLock) selectionCache.Clear();
             modeLabel.Text = "选择文件后，将鼠标推过左右屏幕边缘";
             modeLabel.ForeColor = Color.FromArgb(5, 150, 105);
             SetStatus("选择模式已开启：现在可在资源管理器中选择文件，然后移到屏幕边缘；Esc 取消。", false);
@@ -250,18 +258,29 @@ namespace CrossScreenBridge
             var bounds = Screen.PrimaryScreen.Bounds;
             if (!controllingRemote)
             {
+                if (selectionArmed)
+                {
+                    var selecting = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
+                    if (selecting) selectionButtonWasDown = true;
+                    else if (selectionButtonWasDown)
+                    {
+                        selectionButtonWasDown = false;
+                        StartSelectionCacheCapture();
+                    }
+                }
                 if (cursor.X <= bounds.Left + 1 || cursor.X >= bounds.Right - 2)
                 {
                     if (selectionArmed)
                     {
                         var nativeDragActive = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
+                        List<string> selected;
+                        lock (selectionCacheLock) selected = selectionCache.ToList();
+                        if (selected.Count == 0) selected = GetExplorerSelectedPaths();
                         if (nativeDragActive)
                         {
                             keybd_event((byte)Keys.Escape, 0, 0, UIntPtr.Zero);
                             keybd_event((byte)Keys.Escape, 0, 0x0002, UIntPtr.Zero);
-                            Application.DoEvents();
                         }
-                        var selected = GetExplorerSelectedPaths();
                         if (selected.Count == 0) selected = GetExplorerSelectionViaClipboard();
                         if (selected.Count == 0)
                         {
@@ -350,11 +369,47 @@ namespace CrossScreenBridge
             if (controlPeer != null) SendControl(controlPeer, "CANCEL");
             RestoreLocalCursor();
             bridgeEnabled = false; selectionArmed = false; carriedPaths.Clear(); controlPeer = null;
+            selectionGeneration++; selectionCaptureRunning = false;
             awaitingConfirmation = false; transferStarted = false; confirmationId = null; remoteSawLeftDown = false;
             RemoveInputHooks();
             modeLabel.Text = "Alt+C 开启跨屏通道";
             modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
             SetStatus(message, false); UpdateDropHint();
+        }
+
+        void StartSelectionCacheCapture()
+        {
+            if (selectionCaptureRunning || !selectionArmed) return;
+            selectionCaptureRunning = true;
+            var generation = selectionGeneration;
+            var thread = new Thread(() =>
+            {
+                List<string> selected;
+                try { selected = GetExplorerSelectedPaths(); }
+                catch { selected = new List<string>(); }
+                lock (selectionCacheLock)
+                {
+                    if (generation == selectionGeneration)
+                    {
+                        selectionCache.Clear();
+                        selectionCache.AddRange(selected);
+                    }
+                }
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (generation != selectionGeneration) return;
+                        selectionCaptureRunning = false;
+                        if (selectionArmed && selected.Count > 0)
+                            SetStatus("已准备 " + selected.Count + " 项；将鼠标推到屏幕边缘即可跨屏。", false);
+                    }));
+                }
+                catch { if (generation == selectionGeneration) selectionCaptureRunning = false; }
+            });
+            thread.IsBackground = true;
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
         }
 
         void RestoreLocalCursor()
