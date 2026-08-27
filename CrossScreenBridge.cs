@@ -59,6 +59,10 @@ namespace CrossScreenBridge
         bool bridgeEnabled;
         bool controllingRemote;
         bool lastLeftDown;
+        bool remoteSawLeftDown;
+        bool awaitingConfirmation;
+        bool transferStarted;
+        string confirmationId;
         Peer controlPeer;
         Point localReturnPoint;
 
@@ -79,6 +83,8 @@ namespace CrossScreenBridge
         static extern short GetAsyncKeyState(int key);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern IntPtr GetForegroundWindow();
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
 
         public MainForm()
         {
@@ -207,6 +213,8 @@ namespace CrossScreenBridge
                 if (cursor.X <= bounds.Left + 1 || cursor.X >= bounds.Right - 2)
                 {
                     controllingRemote = true;
+                    remoteSawLeftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
+                    lastLeftDown = remoteSawLeftDown;
                     localReturnPoint = new Point(cursor.X <= bounds.Left + 1 ? bounds.Left + 8 : bounds.Right - 9, cursor.Y);
                     SetCursorPos(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
                     ShowCursor(false);
@@ -226,16 +234,48 @@ namespace CrossScreenBridge
                 SetCursorPos(centerX, centerY);
             }
             var leftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
-            if (leftDown && !lastLeftDown) DropOnRemote();
+            if (awaitingConfirmation)
+            {
+                if (leftDown != lastLeftDown) SendControl(controlPeer, "BUTTON|" + (leftDown ? "DOWN" : "UP"));
+            }
+            else
+            {
+                if (leftDown) remoteSawLeftDown = true;
+                if (!leftDown && lastLeftDown && remoteSawLeftDown) RequestRemoteConfirmation();
+            }
             lastLeftDown = leftDown;
         }
 
-        async void DropOnRemote()
+        void RequestRemoteConfirmation()
         {
-            if (!controllingRemote || controlPeer == null) return;
+            if (!controllingRemote || controlPeer == null || awaitingConfirmation || transferStarted) return;
+            awaitingConfirmation = true;
+            confirmationId = Guid.NewGuid().ToString("N");
+            SendControl(controlPeer, "PROMPT|" + confirmationId + "|" + carriedPaths.Count);
+            SetStatus("请在接收方确认是否传输；确认后鼠标会自动返回。", false);
+        }
+
+        void CompleteRemoteConfirmation(bool accepted)
+        {
+            if (!awaitingConfirmation || transferStarted) return;
+            awaitingConfirmation = false;
             mouseTimer.Stop();
             RestoreLocalCursor();
+            if (!accepted)
+            {
+                bridgeEnabled = false; carriedPaths.Clear(); controlPeer = null;
+                modeLabel.Text = "Alt+C 开启跨屏通道";
+                modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
+                SetStatus("接收方已取消传输。", false); UpdateDropHint();
+                return;
+            }
+            transferStarted = true;
             SendControl(controlPeer, "DROP|" + carriedPaths.Count);
+            SendCarriedFiles();
+        }
+
+        async void SendCarriedFiles()
+        {
             var peer = controlPeer;
             var paths = carriedPaths.ToArray();
             bridgeEnabled = false;
@@ -248,7 +288,7 @@ namespace CrossScreenBridge
             catch (Exception ex) { SetStatus("跨屏传输失败：" + ex.Message, true); }
             finally
             {
-                carriedPaths.Clear(); controlPeer = null;
+                carriedPaths.Clear(); controlPeer = null; transferStarted = false; confirmationId = null;
                 modeLabel.Text = "Alt+C 开启跨屏通道";
                 modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
                 UpdateDropHint();
@@ -261,6 +301,7 @@ namespace CrossScreenBridge
             if (controlPeer != null) SendControl(controlPeer, "CANCEL");
             RestoreLocalCursor();
             bridgeEnabled = false; carriedPaths.Clear(); controlPeer = null;
+            awaitingConfirmation = false; transferStarted = false; confirmationId = null; remoteSawLeftDown = false;
             modeLabel.Text = "Alt+C 开启跨屏通道";
             modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
             SetStatus(message, false); UpdateDropHint();
@@ -269,7 +310,7 @@ namespace CrossScreenBridge
         void RestoreLocalCursor()
         {
             if (!controllingRemote) return;
-            controllingRemote = false; lastLeftDown = false;
+            controllingRemote = false; lastLeftDown = false; remoteSawLeftDown = false;
             ShowCursor(true);
             SetCursorPos(localReturnPoint.X, localReturnPoint.Y);
         }
@@ -504,6 +545,37 @@ namespace CrossScreenBridge
                         else if (parts.Length >= 3 && parts[1] == "ENTER")
                         {
                             BeginInvoke(new Action(() => { Show(); WindowState = FormWindowState.Normal; TopMost = true; SetStatus("另一台设备携带 " + parts[2] + " 项文件进入本屏幕。", false); }));
+                        }
+                        else if (parts.Length >= 4 && parts[1] == "PROMPT")
+                        {
+                            var requestId = parts[2];
+                            var itemCount = parts[3];
+                            var sourceAddress = packet.RemoteEndPoint.Address.ToString();
+                            BeginInvoke(new Action(() =>
+                            {
+                                Show(); WindowState = FormWindowState.Normal; TopMost = true; Activate();
+                                var answer = MessageBox.Show(this,
+                                    "是否要将 " + itemCount + " 项文件传输到：\r\n\r\n" + receiveDir,
+                                    "确认跨屏传输", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                                var sourcePeer = new Peer { Address = sourceAddress, Port = TransferPort, Name = sourceAddress };
+                                SendControl(sourcePeer, "CONFIRM|" + requestId + "|" + (answer == DialogResult.Yes ? "YES" : "NO"));
+                                TopMost = false;
+                            }));
+                        }
+                        else if (parts.Length >= 4 && parts[1] == "CONFIRM")
+                        {
+                            var requestId = parts[2];
+                            var accepted = parts[3] == "YES";
+                            BeginInvoke(new Action(() =>
+                            {
+                                if (requestId == confirmationId) CompleteRemoteConfirmation(accepted);
+                            }));
+                        }
+                        else if (parts.Length >= 3 && parts[1] == "BUTTON")
+                        {
+                            const uint leftDownFlag = 0x0002;
+                            const uint leftUpFlag = 0x0004;
+                            mouse_event(parts[2] == "DOWN" ? leftDownFlag : leftUpFlag, 0, 0, 0, UIntPtr.Zero);
                         }
                         else if (parts.Length >= 2 && parts[1] == "DROP")
                         {
