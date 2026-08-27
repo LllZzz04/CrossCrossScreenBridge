@@ -50,6 +50,7 @@ namespace CrossScreenBridge
         string receiveDir;
         readonly string settingsPath;
         readonly ConcurrentDictionary<string, Peer> peers = new ConcurrentDictionary<string, Peer>();
+        readonly ConcurrentDictionary<string, string> pendingDropDirectories = new ConcurrentDictionary<string, string>();
         readonly CancellationTokenSource stop = new CancellationTokenSource();
         readonly ListBox peerList = new ListBox();
         readonly Label status = new Label();
@@ -97,6 +98,12 @@ namespace CrossScreenBridge
         static extern short GetAsyncKeyState(int key);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        static extern IntPtr WindowFromPoint(NativePoint point);
+        [DllImport("user32.dll")]
+        static extern IntPtr GetAncestor(IntPtr window, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern int GetClassName(IntPtr window, StringBuilder className, int maxCount);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
         [DllImport("user32.dll", SetLastError = true)]
@@ -123,7 +130,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V5.4 · Raw Input 实验版";
+            Text = "跨屏桥 V5.5 · 资源管理器投放实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -317,6 +324,7 @@ namespace CrossScreenBridge
             try
             {
                 foreach (var item in ExpandPaths(paths)) await SendItem(peer, item);
+                SendControl(peer, "DONE");
                 SetStatus("跨屏传输完成。", false);
             }
             catch (Exception ex) { SetStatus("跨屏传输失败：" + ex.Message, true); }
@@ -646,10 +654,13 @@ namespace CrossScreenBridge
                             var sourceAddress = packet.RemoteEndPoint.Address.ToString();
                             BeginInvoke(new Action(() =>
                             {
+                                var destination = ResolveRemoteDropDirectory();
                                 Show(); WindowState = FormWindowState.Normal; TopMost = true; Activate();
                                 var answer = MessageBox.Show(this,
-                                    "是否要将 " + itemCount + " 项文件传输到：\r\n\r\n" + receiveDir,
+                                    "是否要将 " + itemCount + " 项文件传输到：\r\n\r\n" + destination,
                                     "确认跨屏传输", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                                if (answer == DialogResult.Yes) pendingDropDirectories[sourceAddress] = destination;
+                                else { string ignored; pendingDropDirectories.TryRemove(sourceAddress, out ignored); }
                                 var sourcePeer = new Peer { Address = sourceAddress, Port = TransferPort, Name = sourceAddress };
                                 SendControl(sourcePeer, "CONFIRM|" + requestId + "|" + (answer == DialogResult.Yes ? "YES" : "NO"));
                                 TopMost = false;
@@ -674,8 +685,15 @@ namespace CrossScreenBridge
                         {
                             BeginInvoke(new Action(() => SetStatus("正在接收跨屏文件…", false)));
                         }
+                        else if (parts.Length >= 2 && parts[1] == "DONE")
+                        {
+                            string ignored;
+                            pendingDropDirectories.TryRemove(packet.RemoteEndPoint.Address.ToString(), out ignored);
+                        }
                         else if (parts.Length >= 2 && parts[1] == "CANCEL")
                         {
+                            string ignored;
+                            pendingDropDirectories.TryRemove(packet.RemoteEndPoint.Address.ToString(), out ignored);
                             BeginInvoke(new Action(() => { TopMost = false; SetStatus("对方已取消跨屏操作。", false); }));
                         }
                     }
@@ -776,7 +794,10 @@ namespace CrossScreenBridge
                 var relativePath = reader.ReadString();
                 var length = reader.ReadInt64();
                 if (length < 0 || length > 100L * 1024 * 1024 * 1024) return;
-                var destination = SafeDestination(relativePath);
+                var sourceAddress = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
+                string selectedDirectory;
+                if (!pendingDropDirectories.TryGetValue(sourceAddress, out selectedDirectory)) selectedDirectory = receiveDir;
+                var destination = SafeDestination(relativePath, selectedDirectory);
                 if (destination == null) return;
                 if (isDirectory)
                 {
@@ -808,13 +829,50 @@ namespace CrossScreenBridge
             }
         }
 
-        string SafeDestination(string relativePath)
+        string SafeDestination(string relativePath, string rootDirectory)
         {
             if (String.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath)) return null;
-            var root = Path.GetFullPath(receiveDir).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var root = Path.GetFullPath(rootDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
             if (!candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return null;
             return candidate;
+        }
+
+        string ResolveRemoteDropDirectory()
+        {
+            NativePoint point;
+            if (!GetCursorPos(out point)) return receiveDir;
+            var hit = WindowFromPoint(point);
+            var rootWindow = GetAncestor(hit, 2);
+            object shell = null;
+            try
+            {
+                shell = Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application"));
+                var windows = GetCom(shell, "Windows");
+                var count = Convert.ToInt32(GetCom(windows, "Count"));
+                for (var i = 0; i < count; i++)
+                {
+                    try
+                    {
+                        var window = GetCom(windows, "Item", i);
+                        if (window == null || Convert.ToInt64(GetCom(window, "HWND")) != rootWindow.ToInt64()) continue;
+                        var document = GetCom(window, "Document");
+                        var folder = GetCom(document, "Folder");
+                        var self = GetCom(folder, "Self");
+                        var path = Convert.ToString(GetCom(self, "Path"));
+                        if (Directory.Exists(path)) return path;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            var className = new StringBuilder(128);
+            GetClassName(rootWindow, className, className.Capacity);
+            var windowClass = className.ToString();
+            if (windowClass == "Progman" || windowClass == "WorkerW")
+                return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            return receiveDir;
         }
 
         string LoadOrChooseReceiveDirectory()
