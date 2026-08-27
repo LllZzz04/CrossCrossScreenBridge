@@ -65,6 +65,7 @@ namespace CrossScreenBridge
         string confirmationId;
         Peer controlPeer;
         Point localReturnPoint;
+        Point localControlAnchor;
 
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         struct NativePoint { public int X; public int Y; }
@@ -93,7 +94,7 @@ namespace CrossScreenBridge
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V5 · 跨屏实验版";
+            Text = "跨屏桥 V5.3 · 跨屏实验版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -216,22 +217,21 @@ namespace CrossScreenBridge
                     remoteSawLeftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
                     lastLeftDown = remoteSawLeftDown;
                     localReturnPoint = new Point(cursor.X <= bounds.Left + 1 ? bounds.Left + 8 : bounds.Right - 9, cursor.Y);
-                    SetCursorPos(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
-                    ShowCursor(false);
+                    localControlAnchor = localReturnPoint;
+                    SetCursorPos(localControlAnchor.X, localControlAnchor.Y);
+                    HideLocalCursor();
                     SendControl(controlPeer, "ENTER|" + carriedPaths.Count);
                     SetStatus("鼠标已进入 " + controlPeer.Name + "；移动到目标位置后单击放下。", false);
                 }
                 return;
             }
 
-            var centerX = bounds.Left + bounds.Width / 2;
-            var centerY = bounds.Top + bounds.Height / 2;
-            var dx = cursor.X - centerX;
-            var dy = cursor.Y - centerY;
+            var dx = cursor.X - localControlAnchor.X;
+            var dy = cursor.Y - localControlAnchor.Y;
             if (dx != 0 || dy != 0)
             {
                 SendControl(controlPeer, "MOVE|" + dx + "|" + dy);
-                SetCursorPos(centerX, centerY);
+                SetCursorPos(localControlAnchor.X, localControlAnchor.Y);
             }
             var leftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
             if (awaitingConfirmation)
@@ -311,8 +311,20 @@ namespace CrossScreenBridge
         {
             if (!controllingRemote) return;
             controllingRemote = false; lastLeftDown = false; remoteSawLeftDown = false;
-            ShowCursor(true);
+            ShowLocalCursor();
             SetCursorPos(localReturnPoint.X, localReturnPoint.Y);
+        }
+
+        void HideLocalCursor()
+        {
+            // ShowCursor uses a process-wide display counter. One call is not
+            // guaranteed to hide it when another component incremented it.
+            for (var i = 0; i < 16 && ShowCursor(false) >= 0; i++) { }
+        }
+
+        void ShowLocalCursor()
+        {
+            for (var i = 0; i < 16 && ShowCursor(true) < 0; i++) { }
         }
 
         void SendControl(Peer peer, string command)
