@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using Microsoft.Win32;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -51,6 +52,7 @@ namespace CrossScreenBridge
         readonly string pairingCode;
         string receiveDir;
         readonly string settingsPath;
+        readonly string preferencesPath;
         readonly ConcurrentDictionary<string, Peer> peers = new ConcurrentDictionary<string, Peer>();
         readonly ConcurrentDictionary<string, string> pendingDropDirectories = new ConcurrentDictionary<string, string>();
         readonly CancellationTokenSource stop = new CancellationTokenSource();
@@ -77,6 +79,12 @@ namespace CrossScreenBridge
         System.Threading.Timer rawInputFlushTimer;
         bool highResolutionTimerEnabled;
         bool allowExit;
+        int mouseRefreshRate = 240;
+        int mouseSensitivityPercent = 100;
+        string activationEdge = "Both";
+        bool notifyOnComplete = true;
+        double sensitivityRemainderX;
+        double sensitivityRemainderY;
         bool controllingRemote;
         volatile bool remoteEntryReady;
         bool lastLeftDown;
@@ -156,10 +164,12 @@ namespace CrossScreenBridge
         {
             pairingCode = MakeCode(deviceName);
             settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CrossScreenBridge", "receive-folder.txt");
+            preferencesPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CrossScreenBridge", "settings.ini");
+            LoadPreferences();
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
 
-            Text = "跨屏桥 V6.7 · 单实例托盘版";
+            Text = "跨屏桥 V6.8 · 设置版";
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -190,9 +200,9 @@ namespace CrossScreenBridge
             modeLabel.ForeColor = Color.FromArgb(100, 116, 139);
             modeLabel.Location = new Point(22, 55);
             var identity = new Label { Text = deviceName + "    配对码 " + pairingCode, AutoSize = true, Anchor = AnchorStyles.Top | AnchorStyles.Right, Location = new Point(340, 26), ForeColor = Color.FromArgb(71, 85, 105) };
-            var changeFolder = new Button { Text = "更改保存位置", Width = 112, Height = 28, Location = new Point(438, 54), Anchor = AnchorStyles.Top | AnchorStyles.Right };
-            changeFolder.Click += (s, e) => ChooseReceiveDirectory(false);
-            header.Controls.Add(title); header.Controls.Add(modeLabel); header.Controls.Add(identity); header.Controls.Add(changeFolder);
+            var settingsButton = new Button { Text = "设置", Width = 112, Height = 28, Location = new Point(438, 54), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            settingsButton.Click += (s, e) => ShowSettingsDialog();
+            header.Controls.Add(title); header.Controls.Add(modeLabel); header.Controls.Add(identity); header.Controls.Add(settingsButton);
 
             var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(22, 18, 22, 12) };
             var listTitle = new Label { Text = "局域网中的设备", Font = new Font(Font, FontStyle.Bold), Dock = DockStyle.Top, Height = 28 };
@@ -240,7 +250,7 @@ namespace CrossScreenBridge
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开跨屏桥", null, (s, e) => ShowMainWindow());
             menu.Items.Add("取消当前跨屏", null, (s, e) => { if (bridgeEnabled) CancelCrossScreen("已从托盘取消跨屏模式"); });
-            menu.Items.Add("更改接收位置", null, (s, e) => { ShowMainWindow(); ChooseReceiveDirectory(false); });
+            menu.Items.Add("设置…", null, (s, e) => ShowSettingsDialog());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (s, e) => { allowExit = true; Close(); });
             trayIcon.Icon = SystemIcons.Application;
@@ -248,6 +258,122 @@ namespace CrossScreenBridge
             trayIcon.ContextMenuStrip = menu;
             trayIcon.Visible = true;
             trayIcon.DoubleClick += (s, e) => ShowMainWindow();
+        }
+
+        void ShowSettingsDialog()
+        {
+            using (var dialog = new Form())
+            {
+                dialog.Text = "跨屏桥设置";
+                dialog.Font = Font;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.StartPosition = FormStartPosition.CenterScreen;
+                dialog.MinimizeBox = false;
+                dialog.MaximizeBox = false;
+                dialog.ShowInTaskbar = false;
+                dialog.ClientSize = new Size(470, 365);
+
+                var autoStart = new CheckBox { Text = "登录 Windows 时自动启动跨屏桥", AutoSize = true, Location = new Point(24, 22), Checked = IsAutoStartEnabled() };
+                var refreshLabel = new Label { Text = "远端鼠标刷新率", AutoSize = true, Location = new Point(24, 65) };
+                var refresh = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(210, 61), Width = 150 };
+                refresh.Items.AddRange(new object[] { "60 Hz", "120 Hz", "144 Hz", "240 Hz" });
+                refresh.SelectedItem = mouseRefreshRate + " Hz";
+                if (refresh.SelectedIndex < 0) refresh.SelectedItem = "240 Hz";
+
+                var sensitivityLabel = new Label { Text = "远端鼠标灵敏度", AutoSize = true, Location = new Point(24, 105) };
+                var sensitivity = new NumericUpDown { Minimum = 50, Maximum = 200, Increment = 5, Value = mouseSensitivityPercent, Location = new Point(210, 101), Width = 100 };
+                var percent = new Label { Text = "%", AutoSize = true, Location = new Point(315, 105) };
+
+                var edgeLabel = new Label { Text = "跨屏触发边缘", AutoSize = true, Location = new Point(24, 145) };
+                var edge = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(210, 141), Width = 150 };
+                edge.Items.AddRange(new object[] { "左侧和右侧", "仅左侧", "仅右侧" });
+                edge.SelectedIndex = activationEdge == "Left" ? 1 : activationEdge == "Right" ? 2 : 0;
+
+                var notifications = new CheckBox { Text = "传输完成后显示托盘通知", AutoSize = true, Location = new Point(24, 185), Checked = notifyOnComplete };
+                var folderLabel = new Label { Text = "默认接收目录", AutoSize = true, Location = new Point(24, 229) };
+                var folder = new TextBox { Text = receiveDir, ReadOnly = true, Location = new Point(24, 253), Width = 330 };
+                var browse = new Button { Text = "浏览…", Location = new Point(364, 251), Width = 80 };
+                browse.Click += (s, e) =>
+                {
+                    using (var picker = new FolderBrowserDialog())
+                    {
+                        picker.Description = "选择接收文件的保存位置";
+                        picker.SelectedPath = folder.Text;
+                        if (picker.ShowDialog(dialog) == DialogResult.OK) folder.Text = picker.SelectedPath;
+                    }
+                };
+
+                var save = new Button { Text = "保存", DialogResult = DialogResult.OK, Location = new Point(272, 316), Width = 80 };
+                var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Location = new Point(364, 316), Width = 80 };
+                dialog.AcceptButton = save; dialog.CancelButton = cancel;
+                dialog.Controls.AddRange(new Control[] { autoStart, refreshLabel, refresh, sensitivityLabel, sensitivity, percent, edgeLabel, edge, notifications, folderLabel, folder, browse, save, cancel });
+
+                if (dialog.ShowDialog() != DialogResult.OK) return;
+                mouseRefreshRate = int.Parse(refresh.SelectedItem.ToString().Split(' ')[0]);
+                mouseSensitivityPercent = (int)sensitivity.Value;
+                activationEdge = edge.SelectedIndex == 1 ? "Left" : edge.SelectedIndex == 2 ? "Right" : "Both";
+                notifyOnComplete = notifications.Checked;
+                receiveDir = folder.Text;
+                Directory.CreateDirectory(receiveDir);
+                SaveReceiveDirectory(receiveDir);
+                SavePreferences();
+                try { SetAutoStart(autoStart.Checked); }
+                catch (Exception ex) { MessageBox.Show("无法更新开机启动设置：" + ex.Message, "跨屏桥", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+                SetStatus("设置已保存。", false);
+            }
+        }
+
+        bool IsAutoStartEnabled()
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run", false))
+                return key != null && key.GetValue("CrossScreenBridge") != null;
+        }
+
+        void SetAutoStart(bool enabled)
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run", true))
+            {
+                if (key == null) throw new InvalidOperationException("无法打开当前用户启动项注册表。 ");
+                if (!enabled) { key.DeleteValue("CrossScreenBridge", false); return; }
+                var home = Environment.GetEnvironmentVariable("CROSSSCREENBRIDGE_HOME");
+                if (String.IsNullOrWhiteSpace(home)) throw new InvalidOperationException("无法确定程序目录。 ");
+                var launcher = Path.Combine(home, "Start-CrossScreenBridge.vbs");
+                key.SetValue("CrossScreenBridge", "wscript.exe \"" + launcher + "\"");
+            }
+        }
+
+        void LoadPreferences()
+        {
+            try
+            {
+                if (!File.Exists(preferencesPath)) return;
+                foreach (var line in File.ReadAllLines(preferencesPath, Encoding.UTF8))
+                {
+                    var split = line.IndexOf('=');
+                    if (split <= 0) continue;
+                    var key = line.Substring(0, split).Trim();
+                    var value = line.Substring(split + 1).Trim();
+                    int number;
+                    bool flag;
+                    if (key == "MouseRefreshRate" && int.TryParse(value, out number) && new[] { 60, 120, 144, 240 }.Contains(number)) mouseRefreshRate = number;
+                    else if (key == "MouseSensitivity" && int.TryParse(value, out number)) mouseSensitivityPercent = Math.Max(50, Math.Min(200, number));
+                    else if (key == "ActivationEdge" && new[] { "Both", "Left", "Right" }.Contains(value)) activationEdge = value;
+                    else if (key == "NotifyOnComplete" && bool.TryParse(value, out flag)) notifyOnComplete = flag;
+                }
+            }
+            catch { }
+        }
+
+        void SavePreferences()
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(preferencesPath));
+            File.WriteAllLines(preferencesPath, new[]
+            {
+                "MouseRefreshRate=" + mouseRefreshRate,
+                "MouseSensitivity=" + mouseSensitivityPercent,
+                "ActivationEdge=" + activationEdge,
+                "NotifyOnComplete=" + notifyOnComplete
+            }, Encoding.UTF8);
         }
 
         void ShowMainWindow()
@@ -333,9 +459,12 @@ namespace CrossScreenBridge
                         StartSelectionCacheCapture();
                     }
                 }
-                if (cursor.X <= bounds.Left + 1 || cursor.X >= bounds.Right - 2)
+                var atLeftEdge = cursor.X <= bounds.Left + 1;
+                var atRightEdge = cursor.X >= bounds.Right - 2;
+                var allowedEdge = (atLeftEdge && activationEdge != "Right") || (atRightEdge && activationEdge != "Left");
+                if (allowedEdge)
                 {
-                    var entrySide = cursor.X <= bounds.Left + 1 ? "LEFT" : "RIGHT";
+                    var entrySide = atLeftEdge ? "LEFT" : "RIGHT";
                     var entryY = bounds.Height <= 1 ? 0 : (int)Math.Round((cursor.Y - bounds.Top) * 10000.0 / (bounds.Height - 1));
                     if (selectionArmed)
                     {
@@ -366,7 +495,7 @@ namespace CrossScreenBridge
                     remoteEntryReady = false;
                     remoteSawLeftDown = (GetAsyncKeyState((int)Keys.LButton) & 0x8000) != 0;
                     lastLeftDown = remoteSawLeftDown;
-                    localReturnPoint = new Point(cursor.X <= bounds.Left + 1 ? bounds.Left + 8 : bounds.Right - 9, cursor.Y);
+                    localReturnPoint = new Point(atLeftEdge ? bounds.Left + 8 : bounds.Right - 9, cursor.Y);
                     localControlAnchor = localReturnPoint;
                     Interlocked.Exchange(ref pendingRawX, 0);
                     Interlocked.Exchange(ref pendingRawY, 0);
@@ -424,6 +553,7 @@ namespace CrossScreenBridge
                 foreach (var item in ExpandPaths(paths)) await SendItem(peer, item);
                 SendControl(peer, "DONE");
                 SetStatus("跨屏传输完成。", false);
+                if (notifyOnComplete) trayIcon.ShowBalloonTip(1800, "跨屏传输完成", "文件已成功发送到 " + peer.Name, ToolTipIcon.Info);
             }
             catch (Exception ex) { SetStatus("跨屏传输失败：" + ex.Message, true); }
             finally
@@ -802,14 +932,19 @@ namespace CrossScreenBridge
         void StartHighRateInput()
         {
             if (rawInputFlushTimer != null) return;
+            sensitivityRemainderX = 0;
+            sensitivityRemainderY = 0;
             highResolutionTimerEnabled = timeBeginPeriod(1) == 0;
-            rawInputFlushTimer = new System.Threading.Timer(FlushRawMouseMovement, null, 4, 4);
+            var interval = Math.Max(1, (int)Math.Round(1000.0 / mouseRefreshRate));
+            rawInputFlushTimer = new System.Threading.Timer(FlushRawMouseMovement, null, interval, interval);
         }
 
         void StopHighRateInput()
         {
             var timer = rawInputFlushTimer;
             rawInputFlushTimer = null;
+            sensitivityRemainderX = 0;
+            sensitivityRemainderY = 0;
             if (timer != null) timer.Dispose();
             if (highResolutionTimerEnabled)
             {
@@ -828,7 +963,13 @@ namespace CrossScreenBridge
             }
             var dx = Interlocked.Exchange(ref pendingRawX, 0);
             var dy = Interlocked.Exchange(ref pendingRawY, 0);
-            if (dx != 0 || dy != 0) SendControl(controlPeer, "MOVE|" + dx + "|" + dy);
+            var scaledX = dx * mouseSensitivityPercent / 100.0 + sensitivityRemainderX;
+            var scaledY = dy * mouseSensitivityPercent / 100.0 + sensitivityRemainderY;
+            var sendX = (int)Math.Truncate(scaledX);
+            var sendY = (int)Math.Truncate(scaledY);
+            sensitivityRemainderX = scaledX - sendX;
+            sensitivityRemainderY = scaledY - sendY;
+            if (sendX != 0 || sendY != 0) SendControl(controlPeer, "MOVE|" + sendX + "|" + sendY);
         }
 
         async Task ControlReceiver(CancellationToken token)
@@ -907,8 +1048,13 @@ namespace CrossScreenBridge
                         }
                         else if (parts.Length >= 2 && parts[1] == "DONE")
                         {
-                            string ignored;
-                            pendingDropDirectories.TryRemove(packet.RemoteEndPoint.Address.ToString(), out ignored);
+                            string completedDirectory;
+                            pendingDropDirectories.TryRemove(packet.RemoteEndPoint.Address.ToString(), out completedDirectory);
+                            if (notifyOnComplete)
+                            {
+                                var message = String.IsNullOrWhiteSpace(completedDirectory) ? "文件接收完成。" : "文件已保存到 " + completedDirectory;
+                                BeginInvoke(new Action(() => trayIcon.ShowBalloonTip(1800, "跨屏接收完成", message, ToolTipIcon.Info)));
+                            }
                         }
                         else if (parts.Length >= 2 && parts[1] == "CANCEL")
                         {
