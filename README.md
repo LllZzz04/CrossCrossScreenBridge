@@ -69,7 +69,10 @@
 - 打开主窗口
 - 取消当前跨屏操作
 - 打开设置
+- 重启跨屏桥
 - 退出程序
+
+选择“重启跨屏桥”后，程序会先释放全局快捷键、网络端口和单实例锁，再通过隐藏启动入口重新运行。为防止误触，重启前会要求确认；当前跨屏操作和正在进行的传输会被中止。
 
 收到文件、弹出路径确认或完成传输时，主窗口不会自动出现。需要查看主界面时请主动双击托盘图标。
 
@@ -160,6 +163,8 @@ Test-NetConnection 对方IPv4地址 -Port 45991
 
 - `CrossScreenBridge.cs`：主程序、界面、网络传输和跨屏控制实现
 - `CrossScreenBridge.ps1`：编译并启动内嵌 C# 程序
+- `Assets/CrossScreenBridge.ico`：Windows 窗口和系统托盘多尺寸图标
+- `Assets/CrossScreenBridge-Tray.png`：透明背景图标母版
 - `Start-CrossScreenBridge.vbs`：无控制台窗口启动入口
 - `Start-CrossScreenBridge.cmd`：兼容启动入口
 - `Setup-Firewall.cmd`：Windows 防火墙规则配置

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -63,6 +64,7 @@ namespace CrossScreenBridge
         readonly ProgressBar progress = new ProgressBar();
         readonly TextBox manualIp = new TextBox();
         readonly NotifyIcon trayIcon = new NotifyIcon();
+        readonly Icon appIcon;
         readonly System.Windows.Forms.Timer mouseTimer = new System.Windows.Forms.Timer();
         readonly UdpClient controlSender = new UdpClient();
         readonly object controlSendLock = new object();
@@ -79,6 +81,7 @@ namespace CrossScreenBridge
         System.Threading.Timer rawInputFlushTimer;
         bool highResolutionTimerEnabled;
         bool allowExit;
+        public bool RestartRequested { get; private set; }
         int mouseRefreshRate = 240;
         int mouseSensitivityPercent = 100;
         string activationEdge = "Both";
@@ -168,8 +171,10 @@ namespace CrossScreenBridge
             LoadPreferences();
             receiveDir = LoadOrChooseReceiveDirectory();
             Directory.CreateDirectory(receiveDir);
+            appIcon = LoadApplicationIcon();
 
             Text = "跨屏桥 V6.8 · 设置版";
+            Icon = appIcon;
             Font = new Font("Microsoft YaHei UI", 9F);
             BackColor = Color.FromArgb(245, 247, 250);
             ForeColor = Color.FromArgb(30, 41, 59);
@@ -252,12 +257,34 @@ namespace CrossScreenBridge
             menu.Items.Add("取消当前跨屏", null, (s, e) => { if (bridgeEnabled) CancelCrossScreen("已从托盘取消跨屏模式"); });
             menu.Items.Add("设置…", null, (s, e) => ShowSettingsDialog());
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("重启跨屏桥", null, (s, e) => RequestRestart());
             menu.Items.Add("退出", null, (s, e) => { allowExit = true; Close(); });
-            trayIcon.Icon = SystemIcons.Application;
+            trayIcon.Icon = appIcon;
             trayIcon.Text = "跨屏桥 · Ctrl+Alt+M";
             trayIcon.ContextMenuStrip = menu;
             trayIcon.Visible = true;
             trayIcon.DoubleClick += (s, e) => ShowMainWindow();
+        }
+
+        void RequestRestart()
+        {
+            var answer = MessageBox.Show("确定要重启跨屏桥吗？\r\n\r\n当前跨屏操作和正在进行的传输会被中止。", "重启跨屏桥", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+            RestartRequested = true;
+            allowExit = true;
+            Close();
+        }
+
+        Icon LoadApplicationIcon()
+        {
+            try
+            {
+                var appDir = Environment.GetEnvironmentVariable("CROSSSCREENBRIDGE_HOME");
+                var iconPath = Path.Combine(appDir ?? AppDomain.CurrentDomain.BaseDirectory, "Assets", "CrossScreenBridge.ico");
+                if (File.Exists(iconPath)) return new Icon(iconPath);
+            }
+            catch { }
+            return (Icon)SystemIcons.Application.Clone();
         }
 
         void ShowSettingsDialog()
@@ -400,6 +427,7 @@ namespace CrossScreenBridge
             UnregisterHotKey(Handle, HotkeyId);
             trayIcon.Visible = false;
             trayIcon.Dispose();
+            appIcon.Dispose();
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -1367,6 +1395,7 @@ namespace CrossScreenBridge
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             bool createdNew;
+            bool restartRequested = false;
             using (var singleInstance = new Mutex(true, "Local\\CrossScreenBridge.SingleInstance", out createdNew))
             {
                 if (!createdNew)
@@ -1374,11 +1403,41 @@ namespace CrossScreenBridge
                     MessageBox.Show("跨屏桥已经在运行。\r\n\r\n请在系统托盘中找到跨屏桥图标。", "跨屏桥", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-                try { Application.Run(new MainForm()); }
+                try
+                {
+                    using (var mainForm = new MainForm())
+                    {
+                        Application.Run(mainForm);
+                        restartRequested = mainForm.RestartRequested;
+                    }
+                }
                 finally
                 {
                     try { singleInstance.ReleaseMutex(); } catch { }
                 }
+            }
+            if (restartRequested) StartHiddenInstance();
+        }
+
+        static void StartHiddenInstance()
+        {
+            try
+            {
+                var appDir = Environment.GetEnvironmentVariable("CROSSSCREENBRIDGE_HOME") ?? AppDomain.CurrentDomain.BaseDirectory;
+                var launcher = Path.Combine(appDir, "Start-CrossScreenBridge.vbs");
+                if (!File.Exists(launcher)) throw new FileNotFoundException("找不到隐藏启动脚本。", launcher);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "wscript.exe"),
+                    Arguments = "\"" + launcher + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = appDir
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("跨屏桥已退出，但自动重启失败：\r\n" + ex.Message, "重启跨屏桥", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
     }
