@@ -258,6 +258,7 @@ namespace CrossScreenBridge
             menu.Items.Add("设置…", null, (s, e) => ShowSettingsDialog());
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("重启跨屏桥", null, (s, e) => RequestRestart());
+            menu.Items.Add("清除配置并退出…", null, (s, e) => ClearConfigurationAndExit());
             menu.Items.Add("退出", null, (s, e) => { allowExit = true; Close(); });
             trayIcon.Icon = appIcon;
             trayIcon.Text = "跨屏桥 · Ctrl+Alt+M";
@@ -271,6 +272,33 @@ namespace CrossScreenBridge
             var answer = MessageBox.Show("确定要重启跨屏桥吗？\r\n\r\n当前跨屏操作和正在进行的传输会被中止。", "重启跨屏桥", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
             if (answer != DialogResult.Yes) return;
             RestartRequested = true;
+            allowExit = true;
+            Close();
+        }
+
+        void ClearConfigurationAndExit()
+        {
+            var answer = MessageBox.Show(
+                "确定要清除跨屏桥的全部配置吗？\r\n\r\n将删除开机自启动、默认接收目录设置、鼠标设置和通知设置，然后退出软件。已接收的文件不会被删除。",
+                "清除配置并退出", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+
+            try
+            {
+                SetAutoStart(false);
+                var expectedDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CrossScreenBridge");
+                var configurationDirectory = Path.GetDirectoryName(settingsPath);
+                if (!String.Equals(Path.GetFullPath(configurationDirectory), Path.GetFullPath(expectedDirectory), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("配置目录校验失败，已停止清理。 ");
+                if (Directory.Exists(configurationDirectory)) Directory.Delete(configurationDirectory, true);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("未能完整清除配置：\r\n" + ex.Message, "清除配置并退出", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            MessageBox.Show("配置和开机自启动已清除。\r\n\r\n软件退出后，可以直接删除程序文件夹。", "清理完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
             allowExit = true;
             Close();
         }
